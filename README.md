@@ -1,606 +1,585 @@
 # obyvvat.github.io
 
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-  <meta charset="UTF-8" />
-  <title>mDokument – Demo</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+// SPDX-License-Identifier: EUPL-1.2
+// SPDX-FileCopyrightText: 2025 Damian Fajfer <damian@fajfer.org>
+// ==UserScript==
+// @name         mObywatel Code Gallery Downloader
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Download source code files from mObywatel code gallery
+// @author       Damian Fajfer
+// @license      EUPL-1.2
+// @match        https://mobywatel.gov.pl/*
+// @match        https://www.mobywatel.gov.pl/*
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
 
-  <!-- Prosty, "aplikacyjny" styl -->
-  <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+(function() {
+    'use strict';
+
+    // Function to get iframe document
+    function getIframeDocument() {
+        const iframe = document.querySelector('iframe[mogpblockcopy]');
+        if (iframe && iframe.contentDocument) {
+            return iframe.contentDocument;
+        }
+        return null;
     }
 
-    body {
-      background: #0f172a;        /* ciemne tło */
-      color: #0f172a;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      padding: 16px;
+    // Function to get the current filename
+    function getCurrentFileName() {
+        // First try to get from iframe
+        const iframeDoc = getIframeDocument();
+        if (iframeDoc) {
+            const title = iframeDoc.querySelector('title');
+            if (title && title.textContent) {
+                return title.textContent.trim();
+            }
+        }
+        
+        // Try multiple selectors for filename in main document
+        const selectors = [
+            "body > table > tbody > tr > td > center > font",
+            "h1",
+            ".file-name",
+            ".filename",
+            "title",
+            "h2",
+            ".code-header",
+            ".file-header"
+        ];
+        
+        for (const selector of selectors) {
+            const element = document.querySelector(selector);
+            if (element) {
+                const text = element.innerText || element.textContent;
+                if (text && text.trim().length > 0) {
+                    return text.trim();
+                }
+            }
+        }
+        return "unknown-file.txt";
     }
 
-    .app-frame {
-      width: 360px;
-      max-width: 100%;
-      background: #020617;
-      border-radius: 28px;
-      border: 1px solid #1f2937;
-      box-shadow:
-        0 0 0 4px #020617,
-        0 24px 60px rgba(0, 0, 0, 0.65);
-      overflow: hidden;
-      color: #e5e7eb;
+    // Function to get file content (handles both code in <pre> and SVG)
+    function getFileContent() {
+        // First try to get from iframe
+        const iframeDoc = getIframeDocument();
+        if (iframeDoc) {
+            // Check for SVG content first - can be root element or in body
+            let svg = iframeDoc.querySelector('svg');
+            if (!svg && iframeDoc.documentElement && iframeDoc.documentElement.tagName.toLowerCase() === 'svg') {
+                svg = iframeDoc.documentElement;
+            }
+            if (svg) {
+                console.log('Found SVG content in iframe');
+                // Serialize the SVG properly
+                const serializer = new XMLSerializer();
+                const svgString = serializer.serializeToString(svg);
+                // Add XML declaration for proper SVG file
+                return '<?xml version="1.0" encoding="UTF-8"?>\n' + svgString;
+            }
+            
+            // Check for pre tag (code files)
+            const pre = iframeDoc.querySelector('pre');
+            if (pre && pre.textContent) {
+                console.log('Found content in iframe <pre> tag, length:', pre.textContent.length);
+                return pre.textContent;
+            }
+            
+            // Check for other content types (images as base64, etc)
+            const img = iframeDoc.querySelector('img');
+            if (img && img.src) {
+                console.log('Found image in iframe');
+                return img.src; // Return the image source/data URL
+            }
+            
+            // Fallback: get full HTML if nothing else matched (might be an HTML file)
+            const html = iframeDoc.documentElement;
+            if (html) {
+                const serializer = new XMLSerializer();
+                const htmlString = serializer.serializeToString(html);
+                if (htmlString && htmlString.length > 50) {
+                    console.log('Found HTML content in iframe, length:', htmlString.length);
+                    return htmlString;
+                }
+            }
+        }
+        
+        // Try to find the code/content in common structures in main document
+        const possibleSelectors = [
+            "pre",
+            "code",
+            ".code-content",
+            "#code-content",
+            ".source-code",
+            ".file-content",
+            "body > table > tbody > tr > td > pre",
+            "body > table > tbody > tr > td",
+            ".highlight",
+            ".syntax-highlight",
+            "[class*='code']",
+            "[class*='source']"
+        ];
+
+        for (const selector of possibleSelectors) {
+            const elements = document.querySelectorAll(selector);
+            for (const element of elements) {
+                const text = element.innerText || element.textContent;
+                if (text && text.trim().length > 100) { // Only consider substantial content
+                    return text.trim();
+                }
+            }
+        }
+        
+        // Fallback: try to get all text content from the main content area
+        const mainContent = document.querySelector("main, .content, .main, #main, .container");
+        if (mainContent) {
+            const text = mainContent.innerText || mainContent.textContent;
+            if (text && text.trim().length > 100) {
+                return text.trim();
+            }
+        }
+        
+        return null;
     }
 
-    /* Górny pasek "aplikacji" */
-    .status-bar {
-      height: 32px;
-      padding: 0 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 11px;
-      color: #9ca3af;
-      background: linear-gradient(to bottom, #020617, #020617);
+    // Function to determine MIME type based on filename
+    function getMimeType(filename) {
+        const ext = filename.split('.').pop().toLowerCase();
+        const mimeTypes = {
+            'svg': 'image/svg+xml',
+            'xml': 'application/xml',
+            'json': 'application/json',
+            'html': 'text/html',
+            'htm': 'text/html',
+            'css': 'text/css',
+            'js': 'text/javascript',
+            'ts': 'text/typescript',
+            'kt': 'text/x-kotlin',
+            'java': 'text/x-java',
+            'swift': 'text/x-swift',
+            'py': 'text/x-python',
+            'rb': 'text/x-ruby',
+            'go': 'text/x-go',
+            'rs': 'text/x-rust',
+            'c': 'text/x-c',
+            'cpp': 'text/x-c++',
+            'h': 'text/x-c',
+            'm': 'text/x-objc',
+            'dart': 'text/x-dart',
+            'php': 'text/x-php',
+            'gradle': 'text/x-gradle',
+            'md': 'text/markdown',
+            'txt': 'text/plain',
+            'yml': 'text/yaml',
+            'yaml': 'text/yaml',
+            'properties': 'text/plain',
+            'ini': 'text/plain',
+            'conf': 'text/plain'
+        };
+        return mimeTypes[ext] || 'text/plain';
     }
 
-    .status-left,
-    .status-right {
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    // Function to download file with proper MIME type
+    function downloadFile(filename, content) {
+        const mimeType = getMimeType(filename);
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log(`Downloaded: ${filename} (${mimeType})`);
     }
 
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: #22c55e;
+    // Function to download file with directory structure (uses path as filename)
+    function downloadFileWithPath(filepath, content) {
+        // Replace path separators with a safe character for filename
+        // This creates files like: "src__main__java__com__example__App.java"
+        const safeFilename = filepath.replace(/\//g, '__');
+        const mimeType = getMimeType(filepath);
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = safeFilename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log(`Downloaded: ${safeFilename} (original path: ${filepath})`);
+        return safeFilename;
     }
 
-    .battery {
-      width: 18px;
-      height: 10px;
-      border-radius: 3px;
-      border: 1px solid #9ca3af;
-      position: relative;
+    // Function to extract all file links from the tree view with full paths
+    function getAllFileLinks() {
+        const files = [];
+        const codeExtensions = ['.kt', '.swift', '.java', '.xml', '.gradle', '.json', '.m', '.h', '.cpp', '.c', '.py', '.js', '.ts', '.dart', '.php', '.rb', '.go', '.rs', '.svg', '.png', '.jpg', '.gif', '.txt', '.md', '.yml', '.yaml', '.ini', '.conf', '.properties', '.plist', '.strings', '.storyboard', '.xib', '.html'];
+        
+        // Find the mat-tree element
+        const matTree = document.querySelector('mat-tree');
+        if (!matTree) {
+            console.log('No mat-tree found, falling back to link search');
+            return getAllFileLinksFromLinks();
+        }
+        
+        // Get all tree nodes
+        const treeNodes = matTree.querySelectorAll('mat-tree-node');
+        
+        // Build the tree structure by tracking the path at each level
+        const pathStack = []; // Stack to track folder path at each level
+        
+        treeNodes.forEach((node, index) => {
+            const level = parseInt(node.getAttribute('aria-level') || '1');
+            const button = node.querySelector('gds-button button');
+            if (!button) return;
+            
+            const ariaLabel = button.getAttribute('aria-label');
+            const buttonText = button.textContent.trim();
+            
+            // Check if this is a folder (has "Toggle" in aria-label) or a file
+            const isFolder = ariaLabel && ariaLabel.startsWith('Toggle ');
+            const name = isFolder ? ariaLabel.replace('Toggle ', '') : buttonText;
+            
+            // Update path stack to current level
+            while (pathStack.length >= level) {
+                pathStack.pop();
+            }
+            
+            if (isFolder) {
+                // Add folder to path stack
+                pathStack.push(name);
+            } else {
+                // This is a file - construct full path
+                // Remove .html suffix from filename (they add .html to all files)
+                let filename = name;
+                if (filename.endsWith('.html') && !filename.endsWith('.json.html')) {
+                    // Check if it's a double extension like .swift.html
+                    const withoutHtml = filename.slice(0, -5);
+                    if (codeExtensions.some(ext => withoutHtml.endsWith(ext))) {
+                        filename = withoutHtml;
+                    }
+                } else if (filename.endsWith('.json.html')) {
+                    filename = filename.slice(0, -5); // Remove just .html, keep .json
+                }
+                
+                const fullPath = [...pathStack, filename].join('/');
+                
+                // Check if it has a recognizable file extension
+                const hasCodeExtension = codeExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+                
+                if (hasCodeExtension || filename.includes('.')) {
+                    files.push({
+                        element: button,
+                        node: node,
+                        filename: filename,
+                        fullPath: fullPath,
+                        level: level
+                    });
+                }
+            }
+        });
+        
+        console.log('Found files from tree view:', files);
+        return files;
+    }
+    
+    // Fallback function to get links from <a> elements
+    function getAllFileLinksFromLinks() {
+        const links = [];
+        const codeExtensions = ['.kt', '.swift', '.java', '.xml', '.gradle', '.json', '.m', '.h', '.cpp', '.c', '.py', '.js', '.ts', '.dart', '.php', '.rb', '.go', '.rs', '.svg', '.png', '.jpg', '.gif', '.txt', '.md', '.yml', '.yaml', '.ini', '.conf', '.properties', '.plist', '.strings', '.storyboard', '.xib'];
+        
+        const allLinks = document.querySelectorAll('a');
+        allLinks.forEach(link => {
+            const href = link.getAttribute('href');
+            const text = (link.innerText || link.textContent || '').trim();
+            
+            const isCodeFile = codeExtensions.some(ext => {
+                return (href && href.toLowerCase().endsWith(ext)) || 
+                       (text && text.toLowerCase().endsWith(ext));
+            });
+            
+            if (isCodeFile && href) {
+                links.push({
+                    url: link.href,
+                    text: text,
+                    fullPath: text,
+                    filename: text
+                });
+            }
+        });
+        
+        return links;
     }
 
-    .battery::after {
-      content: "";
-      position: absolute;
-      right: -3px;
-      top: 2px;
-      width: 2px;
-      height: 6px;
-      border-radius: 1px;
-      background: #9ca3af;
+    // Create download button
+    function createDownloadButton() {
+        const button = document.createElement('button');
+        button.innerText = '💾 Download Current File';
+        button.style.cssText = `
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 10000;
+            padding: 10px 20px;
+            background-color: #0052a5;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        `;
+        button.className = 'mobywatel-downloader';
+        button.addEventListener('click', () => {
+            const filename = getCurrentFileName();
+            const content = getFileContent();
+            
+            if (filename && content) {
+                downloadFile(filename, content);
+                alert(`File "${filename}" downloaded successfully!`);
+            } else {
+                alert('Could not extract filename or content. Check console for details.');
+                console.log('Filename:', filename);
+                console.log('Content:', content);
+            }
+        });
+        document.body.appendChild(button);
     }
 
-    .battery-level {
-      height: 100%;
-      width: 70%;
-      background: #22c55e;
+    // Create download all button
+    function createDownloadAllButton() {
+        const button = document.createElement('button');
+        button.innerText = '📦 Download All Files';
+        button.style.cssText = `
+            position: fixed;
+            top: 50px;
+            right: 10px;
+            z-index: 10000;
+            padding: 10px 20px;
+            background-color: #0c5aa9;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        `;
+        button.className = 'mobywatel-downloader';
+        
+        button.addEventListener('click', async () => {
+            const files = getAllFileLinks();
+            if (files.length === 0) {
+                alert('No files found in the tree view.\n\nMake sure you are on a page with a file tree (mogp-tree-view).');
+                return;
+            }
+            
+            const confirmDownload = confirm(`Found ${files.length} files in tree view.\n\nStart downloading all files?\n\nFiles will be saved with directory structure preserved in the filename (e.g., "Sources__Components__Button.swift")`);
+            if (!confirmDownload) return;
+            
+            // Create a progress indicator
+            const progressDiv = document.createElement('div');
+            progressDiv.className = 'mobywatel-downloader';
+            progressDiv.style.cssText = `
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                z-index: 10001;
+                padding: 20px;
+                background-color: rgba(0, 82, 165, 0.95);
+                color: white;
+                border-radius: 10px;
+                font-size: 14px;
+                text-align: center;
+                min-width: 300px;
+            `;
+            document.body.appendChild(progressDiv);
+            
+            const downloadedFiles = [];
+            const failedFiles = [];
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                progressDiv.innerHTML = `<strong>Downloading...</strong><br><br>File ${i + 1} of ${files.length}<br><br><small>${file.fullPath}</small>`;
+                
+                try {
+                    // Click on the file button to load it
+                    if (file.element) {
+                        file.element.click();
+                    }
+                    
+                    // Wait for iframe content to load
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                    
+                    // Get the content
+                    const content = getFileContent();
+                    
+                    if (content && content.length > 0) {
+                        // Download with path in filename
+                        downloadFileWithPath(file.fullPath, content);
+                        downloadedFiles.push(file.fullPath);
+                    } else {
+                        console.log(`No content found for: ${file.fullPath}`);
+                        failedFiles.push(file.fullPath);
+                    }
+                    
+                    // Small delay between downloads
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                } catch (err) {
+                    console.error(`Error downloading ${file.fullPath}:`, err);
+                    failedFiles.push(file.fullPath);
+                }
+            }
+            
+            // Create and download manifest
+            const manifest = createDirectoryManifest(downloadedFiles, failedFiles);
+            downloadFile('_DIRECTORY_STRUCTURE.txt', manifest);
+            
+            progressDiv.remove();
+            
+            alert(`Download complete!\n\n✅ Downloaded: ${downloadedFiles.length} files\n❌ Failed: ${failedFiles.length} files\n\nA manifest file (_DIRECTORY_STRUCTURE.txt) was created with the directory structure.`);
+        });
+        
+        document.body.appendChild(button);
+    }
+    
+    // Function to create a directory structure manifest
+    function createDirectoryManifest(downloadedFiles, failedFiles) {
+        let manifest = "# mObywatel Source Code - Directory Structure\n";
+        manifest += "# Downloaded on: " + new Date().toISOString() + "\n\n";
+        manifest += "Files are named with path separators replaced by '__'\n";
+        manifest += "To restore the original structure, rename files replacing '__' with '/'\n\n";
+        manifest += "## Successfully Downloaded Files:\n\n";
+        
+        downloadedFiles.forEach(path => {
+            const safeName = path.replace(/\//g, '__');
+            manifest += `${safeName}\n  → Original path: ${path}\n\n`;
+        });
+        
+        if (failedFiles.length > 0) {
+            manifest += "\n## Failed Downloads:\n\n";
+            failedFiles.forEach(path => {
+                manifest += `- ${path}\n`;
+            });
+        }
+        
+        return manifest;
     }
 
-    /* Pasek nagłówka dokumentu */
-    .header {
-      padding: 12px 16px 8px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border-bottom: 1px solid #1f2937;
-      background: linear-gradient(135deg, #020617 0%, #111827 60%, #1f2937 100%);
+    // Create manual trigger button
+    function createManualTriggerButton() {
+        const button = document.createElement('button');
+        button.innerText = '� Refresh Downloader';
+        button.style.cssText = `
+            position: fixed;
+            top: 90px;
+            right: 10px;
+            z-index: 10000;
+            padding: 10px 20px;
+            background-color: #1963ae;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        `;
+        button.addEventListener('click', () => {
+            // Remove existing buttons and panels
+            document.querySelectorAll('.mobywatel-downloader').forEach(el => el.remove());
+            
+            // Re-initialize
+            setTimeout(() => {
+                const filename = getCurrentFileName();
+                const fileLinks = getAllFileLinks();
+                const content = getFileContent();
+                
+                createDownloadButton();
+                createDownloadAllButton();
+                createInfoPanel();
+                
+                alert(`Refreshed!\nFilename: ${filename}\nFiles found: ${fileLinks.length}\nContent: ${content ? content.length + ' chars' : 'none'}`);
+            }, 500);
+        });
+        button.className = 'mobywatel-downloader';
+        document.body.appendChild(button);
     }
 
-    .header-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+    // Create info panel
+    function createInfoPanel() {
+        const panel = document.createElement('div');
+        panel.style.cssText = `
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            z-index: 10000;
+            padding: 10px;
+            background-color: rgba(0, 82, 165, 0.9);
+            color: white;
+            border-radius: 5px;
+            font-size: 12px;
+            max-width: 300px;
+            font-family: monospace;
+        `;
+        
+        const filename = getCurrentFileName();
+        const fileLinks = getAllFileLinks();
+        const content = getFileContent();
+        
+        const treeFilesInfo = fileLinks.length > 0 ? 
+            `<br><small>First: ${fileLinks[0].fullPath}</small>` : '';
+        
+        panel.innerHTML = `
+            <strong>mObywatel Downloader</strong><br>
+            Current file: ${filename || 'N/A'}<br>
+            Files in tree: ${fileLinks.length}${treeFilesInfo}<br>
+            Content: ${content ? content.length + ' chars' : 'No iframe content'}<br>
+            <button onclick="console.log('=== DEBUG INFO ==='); console.log('Filename:', '${filename}'); console.log('Content length:', ${content ? content.length : 0}); console.log('Files found:', ${fileLinks.length}); console.log('Files:', JSON.parse('${JSON.stringify(fileLinks).replace(/'/g, "\\'")}'));">Debug Info</button>
+        `;
+        panel.className = 'mobywatel-downloader';
+        document.body.appendChild(panel);
+    }
+    function init() {
+        // Wait for page to be fully loaded
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+            return;
+        }
+        
+        // For SPAs, wait a bit more for dynamic content
+        setTimeout(() => {
+            const filename = getCurrentFileName();
+            const fileLinks = getAllFileLinks();
+            const content = getFileContent();
+            
+            // Only show if we found some content or are on a code page
+            if (filename !== 'unknown-file.txt' || fileLinks.length > 0 || content) {
+                createDownloadButton();
+                createDownloadAllButton();
+                createManualTriggerButton();
+                createInfoPanel();
+                console.log('mObywatel Code Gallery Downloader initialized');
+                console.log('Found filename:', filename);
+                console.log('Found file links:', fileLinks.length);
+                console.log('Content length:', content ? content.length : 0);
+            } else {
+                console.log('mObywatel Downloader: No code content detected yet. Will retry...');
+                // Show manual trigger even if no content detected
+                createManualTriggerButton();
+                createInfoPanel();
+                // Retry after another delay for slow-loading content
+                setTimeout(init, 3000);
+            }
+        }, 2000);
     }
 
-    .app-logo {
-      width: 26px;
-      height: 26px;
-      border-radius: 7px;
-      background: radial-gradient(circle at 30% 30%, #38bdf8, #0369a1);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 700;
-      font-size: 14px;
-      color: #e5e7eb;
-    }
-
-    .header-title {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .header-title-main {
-      font-size: 13px;
-      font-weight: 600;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      color: #f9fafb;
-    }
-
-    .header-title-sub {
-      font-size: 11px;
-      color: #9ca3af;
-    }
-
-    .header-pill {
-      padding: 4px 10px;
-      border-radius: 999px;
-      background: rgba(15, 23, 42, 0.85);
-      border: 1px solid rgba(148, 163, 184, 0.35);
-      font-size: 11px;
-      color: #e5e7eb;
-    }
-
-    /* Główna karta dokumentu */
-    .card-wrapper {
-      padding: 14px 14px 18px 14px;
-      background: radial-gradient(circle at top, #1f2937, #020617 55%);
-    }
-
-    .card {
-      background: linear-gradient(145deg, #f9fafb 0%, #e5e7eb 40%, #d1d5db 100%);
-      border-radius: 22px;
-      padding: 14px 14px 12px 14px;
-      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.75);
-      color: #111827;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .card::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        radial-gradient(circle at -10% -10%, rgba(56, 189, 248, 0.22), transparent 55%),
-        radial-gradient(circle at 110% 110%, rgba(59, 130, 246, 0.2), transparent 60%);
-      opacity: 0.9;
-      pointer-events: none;
-    }
-
-    .card-inner {
-      position: relative;
-      z-index: 1;
-    }
-
-    .card-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 10px;
-    }
-
-    .card-top-left {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-
-    .doc-name {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: #6b7280;
-      font-weight: 600;
-    }
-
-    .doc-type {
-      font-size: 15px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #111827;
-    }
-
-    .badge {
-      margin-top: 4px;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(31, 41, 55, 0.18);
-      background: rgba(249, 250, 251, 0.8);
-      font-size: 10px;
-      color: #374151;
-    }
-
-    .badge-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: #22c55e;
-    }
-
-    .coat {
-      width: 32px;
-      height: 40px;
-      border-radius: 10px;
-      border: 1px solid rgba(31, 41, 55, 0.25);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 9px;
-      font-weight: 700;
-      text-align: center;
-      background: rgba(248, 250, 252, 0.8);
-      color: #111827;
-    }
-
-    /* Sekcja z danymi */
-    .card-content {
-      display: flex;
-      gap: 10px;
-    }
-
-    .photo {
-      width: 80px;
-      height: 96px;
-      border-radius: 14px;
-      overflow: hidden;
-      border: 1px solid rgba(31, 41, 55, 0.35);
-      background: #e5e7eb;
-      flex-shrink: 0;
-    }
-
-    .photo img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-
-    .fields {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-    }
-
-    .field-label {
-      font-size: 9px;
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      color: #6b7280;
-      font-weight: 600;
-    }
-
-    .field-value {
-      font-size: 13px;
-      font-weight: 600;
-      color: #111827;
-      line-height: 1.2;
-    }
-
-    .field-row {
-      display: flex;
-      gap: 10px;
-    }
-
-    .field-row .field {
-      flex: 1;
-    }
-
-    /* Dół karty: PESEL, ważność, kod QR */
-    .card-bottom {
-      margin-top: 10px;
-      padding-top: 8px;
-      border-top: 1px dashed rgba(148, 163, 184, 0.7);
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .bottom-left {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .chip {
-      width: 46px;
-      height: 30px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #e5e7eb, #9ca3af);
-      border: 1px solid rgba(31, 41, 55, 0.35);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .chip-lines {
-      width: 80%;
-      height: 60%;
-      border-radius: 6px;
-      border: 1px solid rgba(75, 85, 99, 0.7);
-      position: relative;
-    }
-
-    .chip-lines::before,
-    .chip-lines::after {
-      content: "";
-      position: absolute;
-      inset: 45% 0;
-      border-top: 1px solid rgba(75, 85, 99, 0.7);
-    }
-
-    .doc-meta {
-      display: flex;
-      gap: 16px;
-      margin-top: 2px;
-    }
-
-    .doc-meta-block {
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-    }
-
-    .doc-meta-label {
-      font-size: 8px;
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      color: #6b7280;
-      font-weight: 600;
-    }
-
-    .doc-meta-value {
-      font-size: 11px;
-      font-weight: 600;
-      color: #111827;
-    }
-
-    .qr {
-      width: 64px;
-      height: 64px;
-      border-radius: 10px;
-      border: 1px solid rgba(31, 41, 55, 0.4);
-      background: repeating-linear-gradient(
-        45deg,
-        #020617,
-        #020617 3px,
-        #111827 3px,
-        #111827 6px
-      );
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .qr-inner {
-      width: 48px;
-      height: 48px;
-      background:
-        radial-gradient(circle at 10% 10%, #f9fafb 0, #f9fafb 3px, transparent 3px),
-        radial-gradient(circle at 90% 10%, #f9fafb 0, #f9fafb 3px, transparent 3px),
-        radial-gradient(circle at 10% 90%, #f9fafb 0, #f9fafb 3px, transparent 3px),
-        radial-gradient(circle at 90% 90%, #f9fafb 0, #f9fafb 3px, transparent 3px),
-        repeating-linear-gradient(0deg, transparent, transparent 3px, #f9fafb 3px, #f9fafb 4px),
-        repeating-linear-gradient(90deg, transparent, transparent 3px, #f9fafb 3px, #f9fafb 4px);
-      mix-blend-mode: screen;
-      opacity: 0.95;
-    }
-
-    /* Dolny pasek aplikacji */
-    .footer {
-      padding: 8px 18px 14px 18px;
-      border-top: 1px solid #1f2937;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: radial-gradient(circle at top, #0f172a, #020617 60%);
-      font-size: 11px;
-      color: #9ca3af;
-    }
-
-    .footer-left {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .footer-label {
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      font-size: 9px;
-      color: #6b7280;
-    }
-
-    .footer-value {
-      font-weight: 500;
-      color: #e5e7eb;
-    }
-
-    .footer-button {
-      padding: 6px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(148, 163, 184, 0.4);
-      background: radial-gradient(circle at 30% 0, #1d4ed8, #0b1120);
-      color: #e5e7eb;
-      font-size: 11px;
-      font-weight: 500;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: default;
-      user-select: none;
-    }
-
-    .footer-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: #22c55e;
-      box-shadow: 0 0 8px rgba(34, 197, 94, 0.9);
-    }
-
-    @media (max-width: 400px) {
-      body {
-        padding: 8px;
-      }
-
-      .app-frame {
-        width: 100%;
-        border-radius: 24px;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="app-frame">
-    <!-- Pasek statusu (czas, sieć, bateria) -->
-    <div class="status-bar">
-      <div class="status-left">
-        <span>9:41</span>
-      </div>
-      <div class="status-right">
-        <div class="status-dot"></div>
-        <span>LTE</span>
-        <div class="battery">
-          <div class="battery-level"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Górny nagłówek aplikacji -->
-    <div class="header">
-      <div class="header-left">
-        <div class="app-logo">m</div>
-        <div class="header-title">
-          <span class="header-title-main">mDokument</span>
-          <span class="header-title-sub">Twoje dane w jednym miejscu</span>
-        </div>
-      </div>
-      <div class="header-pill">
-        Dokument aktywny
-      </div>
-    </div>
-
-    <!-- Główna karta -->
-    <div class="card-wrapper">
-      <div class="card">
-        <div class="card-inner">
-          <div class="card-top">
-            <div class="card-top-left">
-              <span class="doc-name">Rzeczpospolita Polska</span>
-              <span class="doc-type">Dokument tożsamości</span>
-              <div class="badge">
-                <span class="badge-dot"></span>
-                <span>Potwierdzenie danych</span>
-              </div>
-            </div>
-            <div class="coat">
-              RP<br />PL
-            </div>
-          </div>
-
-          <div class="card-content">
-            <!-- TWOJE ZDJĘCIE -->
-            <div class="photo">
-              <!-- Podmień src na swoją fotkę -->
-              <img src="img/profile.jpg" alt="Zdjęcie posiadacza dokumentu" />
-            </div>
-
-            <!-- DANE OSOBOWE -->
-            <div class="fields">
-              <div class="field">
-                <span class="field-label">Imię (imiona)</span>
-                <span class="field-value">Anna Maria</span>
-              </div>
-
-              <div class="field">
-                <span class="field-label">Nazwisko</span>
-                <span class="field-value">Kowalska</span>
-              </div>
-
-              <div class="field-row">
-                <div class="field">
-                  <span class="field-label">Data urodzenia</span>
-                  <span class="field-value">15.04.2002</span>
-                </div>
-                <div class="field">
-                  <span class="field-label">Obywatelstwo</span>
-                  <span class="field-value">POL</span>
-                </div>
-              </div>
-
-              <div class="field-row">
-                <div class="field">
-                  <span class="field-label">Seria i nr</span>
-                  <span class="field-value">ABC123456</span>
-                </div>
-                <div class="field">
-                  <span class="field-label">Data wydania</span>
-                  <span class="field-value">01.06.2024</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Dół karty: PESEL, ważność, "chip", QR -->
-          <div class="card-bottom">
-            <div class="bottom-left">
-              <div class="chip">
-                <div class="chip-lines"></div>
-              </div>
-
-              <div class="doc-meta">
-                <div class="doc-meta-block">
-                  <span class="doc-meta-label">PESEL</span>
-                  <span class="doc-meta-value">02041512345</span>
-                </div>
-                <div class="doc-meta-block">
-                  <span class="doc-meta-label">Ważny do</span>
-                  <span class="doc-meta-value">15.04.2032</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="qr">
-              <div class="qr-inner"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Dolny pasek aplikacji -->
-    <div class="footer">
-      <div class="footer-left">
-        <span class="footer-label">Tryb prezentacji</span>
-        <span class="footer-value">Dane do potwierdzenia tożsamości</span>
-      </div>
-      <div class="footer-button">
-        <span class="footer-dot"></span>
-        <span>Aktywny dokument</span>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
+    // Start the script
+    init();
+})();
